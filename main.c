@@ -7,6 +7,16 @@ unsigned char *str_md5;
 size_t md5_size = 0;
 size_t md5_capacity = 0;
 
+unsigned char *info_buffer = NULL;
+size_t info_size = 0;
+size_t info_capacity = 0;
+
+int compare(const void *p1, const void *p2) {
+    const char *s1 = *(const char **)p1;
+    const char *s2 = *(const char **)p2;
+    return strcmp(s1, s2);
+}
+
 void save_str_md5(unsigned char *digest) {
     for (int i = 0; i < 16; i++) {
         //printf("%02x", digest[i]);
@@ -17,16 +27,64 @@ void save_str_md5(unsigned char *digest) {
     }
 }
 
+void append_file_dir(const char *path) {
+    unsigned char *buffer = malloc(PATH_MAX);
+
+    sprintf(buffer, "%s", path);
+    strcat(buffer, "\n");
+
+    size_t length = strlen(buffer);
+
+    if (!ensure_info_buffer_capacity(info_size + length)) {
+        perror("realloc");
+        exit(1);
+    }
+
+    memcpy(info_buffer + info_size, buffer, length);
+    info_size += length;
+
+    free(buffer);  // 동적 할당한 메모리 해제
+}
+
 bool ensure_md5_buffer_capacity(size_t new_size) {
+    if (new_size == 0) {
+        return true;
+    }
+
     if (new_size > md5_capacity) {
         size_t new_capacity = (new_size + 1023) & ~1023; // 1024의 배수로 올림
         char *new_buffer = realloc(str_md5, new_capacity);
+
         if (new_buffer == NULL) {
+            perror("realloc");
             return false;
         }
+
         str_md5 = new_buffer;
         md5_capacity = new_capacity;
     }
+
+    return true;
+}
+
+bool ensure_info_buffer_capacity(size_t new_size) {
+    if (new_size == 0) {
+        return true;
+    }
+
+    if (new_size >= info_capacity) {
+        size_t new_capacity = (new_size + 1023) & ~1023;
+        unsigned char *new_buffer = realloc(info_buffer, new_capacity);
+
+        if (new_buffer == NULL) {
+            perror("realloc");
+            return false;
+        }
+
+        info_buffer = new_buffer;
+        info_capacity = new_capacity;
+    }
+
     return true;
 }
 
@@ -102,7 +160,45 @@ void proc_file(const char *filename) {
     free(buffer);
 }
 
-void proc_file_or_dir(const char *arg) {
+void proc_dir(const char *arg) {
+    DIR *dir = opendir(arg);
+
+    if(dir == NULL) {
+        perror("opendir");
+
+        return;
+    }
+
+    struct dirent *entry;
+
+    while((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0 || strcmp(entry->d_name, "md5_value.txt") == 0) {
+            continue;
+        }
+
+        char path[PATH_MAX];
+
+        snprintf(path, sizeof(path), "%s/%s", arg, entry->d_name);
+
+        struct stat st;
+
+        if (lstat(path, &st) < 0) {
+            perror("lstat");
+
+            continue;
+        }
+
+        append_file_dir(path);
+
+        if(S_ISDIR(st.st_mode)) {
+            proc_dir(path);
+        }
+    }
+
+    closedir(dir);
+}
+
+void check_file_or_dir(const char *arg) {
     struct stat st;
 
     if (stat(arg, &st) != 0) {
@@ -112,7 +208,7 @@ void proc_file_or_dir(const char *arg) {
     }
 
     if (S_ISDIR(st.st_mode)) {
-        DIR *dir = opendir(arg);
+        /*DIR *dir = opendir(arg);
 
         if (!dir) {
             perror("opendir");
@@ -127,18 +223,30 @@ void proc_file_or_dir(const char *arg) {
                 continue;
             }
 
-            unsigned char child_path[PATH_MAX];
-            snprintf(child_path, sizeof(child_path), "%s/%s", arg, entry->d_name);
-            proc_file_or_dir(child_path);
+            unsigned char path[PATH_MAX];
+
+            snprintf(path, sizeof(path), "%s/%s", arg, entry->d_name);
+
+            struct stat status;
+
+            if (lstat(path, &status) < 0) {
+                perror("lstat");
+                continue;
+            }
+
+            append_file_dir(path);
+
+            check_file_or_dir(path);
         }
 
-        closedir(dir);
+        closedir(dir);*/
+        return;
     }
     else if (S_ISREG(st.st_mode)) {
         proc_file(arg);
     }
     else {
-        printf("Error proc_file_or_dir");
+        printf("Error check_file_or_dir");
     }
 }
 
@@ -154,15 +262,6 @@ void save_md5(const char *filename) {
         return;
     }
 
-    //FILE *file = fopen(filename, "wb");
-
-    //if (file == NULL) {
-    //    perror("fopen");
-    //    close(fd);
-
-    //    return ;
-    //}
-
     calc_md5(fd, str_md5, md5_size, digest);
 
     for (int i = 0; i < 16; i++) {
@@ -171,17 +270,76 @@ void save_md5(const char *filename) {
 
     printf("last calc md5 : %s\n", md5_string);
 
-    //fwrite(md5_string, 1, strlen(md5_string), file);
-    //fclose(file);
+    // save_txt("md5_value.txt", md5_string);
 
     close(fd);
 }
 
-int main(int argc, char *argv[]) {
-    gettimeofday(&start, NULL);
+void sort_info_buffer() {
+    unsigned char *tmp_buffer = malloc(info_size);
+    if (tmp_buffer == NULL) {
+        perror("malloc");
+        exit(1);
+    }
+    memcpy(tmp_buffer, info_buffer, info_size);
+    
+    size_t count = 0;
+    char **str_array = malloc(INITIAL_CAPACITY * sizeof(char *));
+    if (str_array == NULL) {
+        perror("malloc");
+        exit(1);
+    }
 
-    const char *arg;
-    const char *f_name;
+    char *token = strtok(tmp_buffer, "\n");
+    while (token != NULL) {
+        str_array[count++] = token;
+        token = strtok(NULL, "\n");
+    }
+    
+    qsort(str_array, count, sizeof(char *), compare);
+    
+    size_t pos = 0;
+    for (size_t i = 0; i < count; i++) {
+        size_t length = strlen(str_array[i]);
+
+        if (!ensure_info_buffer_capacity(pos + length + 1)) {
+            perror("realloc");
+            exit(1);
+        }
+
+        memcpy(info_buffer + pos, str_array[i], length);
+        pos += length;
+
+        info_buffer[pos++] = '\n';
+    }
+    
+    info_size = pos;
+    
+    free(tmp_buffer);
+    free(str_array);
+}
+
+void save_txt(const char *filename, const unsigned char *buffer) {
+    FILE *file = fopen(filename, "wb");
+
+    if(file == NULL) {
+        perror("fopen");
+
+        return;
+    }
+
+    fwrite(buffer, 1, strlen(buffer), file);
+    fclose(file);
+
+    printf("Directory buffer save to %s.\r\n", filename);
+}
+
+int main(int argc, char *argv[]) {
+    memset(&start, 0, sizeof(start));
+    memset(&end, 0, sizeof(end));
+    memset(&elapsed_time, 0, sizeof(elapsed_time));
+
+    gettimeofday(&start, NULL);
 
     str_md5 = (unsigned char *)calloc(INITIAL_CAPACITY, sizeof(unsigned char));
 
@@ -191,15 +349,15 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    memset(&start, 0, sizeof(start));
-    memset(&end, 0, sizeof(end));
-    memset(&elapsed_time, 0, sizeof(elapsed_time));
-
-    arg = argv[1];
-
-    proc_file_or_dir(arg);
+    proc_dir(argv[1]);
 
     save_md5("md5_value.txt");
+
+    save_txt("file_info_md5test.txt", info_buffer);
+
+    sort_info_buffer();
+
+    save_txt("file_info_md5test_sorted.txt", info_buffer);
 
     gettimeofday(&end, NULL);
 
